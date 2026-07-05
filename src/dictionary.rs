@@ -21,6 +21,11 @@ pub struct Dictionary {
     last_code: Option<u16>,
     last_ptr: Option<NonNull<u8>>,
     last_len: usize,
+    additions_since_compact: usize,
+    retired_since_compact: usize,
+    alias_churn_since_compact: usize,
+    resolves_since_compact: usize,
+    pressure_score: u32,
     epoch: u32,
 }
 
@@ -32,6 +37,11 @@ impl Dictionary {
             last_code: None,
             last_ptr: None,
             last_len: 0,
+            additions_since_compact: 0,
+            retired_since_compact: 0,
+            alias_churn_since_compact: 0,
+            resolves_since_compact: 0,
+            pressure_score: 0,
             epoch: 0,
         }
     }
@@ -52,6 +62,9 @@ impl Dictionary {
             let mut cursor = header.cursor();
             locale = cursor.read_u8().unwrap_or(0);
         }
+        let mut added = 0usize;
+        let mut retired = 0usize;
+        let mut alias_updates = 0usize;
         for value in wire::values(&tlvs, 0x02) {
             let mut cursor = ByteCursor::new(value);
             let code = cursor.read_u16()?;
@@ -65,12 +78,14 @@ impl Dictionary {
                     .to_owned()
             };
             self.insert_phrase(code, locale, text);
+            added += 1;
         }
         for value in wire::values(&tlvs, 0x03) {
             let mut cursor = ByteCursor::new(value);
             let alias = cursor.read_u16()?;
             let target = cursor.read_u16()?;
             self.aliases.push((alias, target));
+            alias_updates += 1;
         }
         for value in wire::values(&tlvs, 0x04) {
             let mut cursor = ByteCursor::new(value);
@@ -78,8 +93,18 @@ impl Dictionary {
                 let code = cursor.read_u16()?;
                 if let Some(entry) = self.phrases.iter_mut().find(|entry| entry.code == code) {
                     entry.retired = true;
+                    retired += 1;
                 }
             }
+        }
+        self.record_pressure(sequence, locale, added, retired, alias_updates);
+        if self.should_pressure_compact(added, retired, alias_updates) {
+            self.compact();
+            diagnostics.push(Diagnostic {
+                code: 0x2102,
+                sequence,
+                detail: "dictionary pressure compaction ran".to_owned(),
+            });
         }
         if self.phrases.len() > 512 {
             diagnostics.push(Diagnostic {
@@ -94,7 +119,7 @@ impl Dictionary {
     pub fn apply_maintenance(&mut self, payload: &[u8]) {
         let action = payload.first().copied().unwrap_or(0);
         if action & 0x01 != 0 {
-            self.compact();
+            self.pressure_score = self.pressure_score.wrapping_add(3);
         }
         if action & 0x02 != 0 {
             self.rebucket_aliases();
@@ -114,12 +139,14 @@ impl Dictionary {
             self.last_code = Some(code);
             self.last_len = entry.text.len();
             self.last_ptr = NonNull::new(entry.text.as_ptr() as *mut u8);
+            self.resolves_since_compact = self.resolves_since_compact.saturating_add(1);
             return entry.text.clone();
         }
         let fallback = catalog::phrases::phrase_for_code(resolved)
             .unwrap_or("unlabeled field")
             .to_owned();
         self.insert_phrase(resolved, 0, fallback.clone());
+        self.resolves_since_compact = self.resolves_since_compact.saturating_add(1);
         fallback
     }
 
@@ -167,6 +194,11 @@ impl Dictionary {
             }
         }
         self.phrases = compacted;
+        self.additions_since_compact = 0;
+        self.retired_since_compact = 0;
+        self.alias_churn_since_compact = 0;
+        self.resolves_since_compact = 0;
+        self.pressure_score = 0;
         self.epoch = self.epoch.wrapping_add(1);
     }
 
@@ -178,6 +210,39 @@ impl Dictionary {
     fn load_catalog_defaults(&mut self, bank: usize) {
         for entry in catalog::phrases::default_bank(bank).iter().take(16) {
             self.insert_phrase(entry.code, entry.locale, entry.text.to_owned());
+            self.additions_since_compact = self.additions_since_compact.saturating_add(1);
         }
+    }
+
+    fn record_pressure(
+        &mut self,
+        sequence: u32,
+        locale: u8,
+        added: usize,
+        retired: usize,
+        alias_updates: usize,
+    ) {
+        self.additions_since_compact = self.additions_since_compact.saturating_add(added);
+        self.retired_since_compact = self.retired_since_compact.saturating_add(retired);
+        self.alias_churn_since_compact = self
+            .alias_churn_since_compact
+            .saturating_add(alias_updates);
+        let mixed = (added as u32).wrapping_mul(7)
+            ^ (retired as u32).wrapping_mul(13)
+            ^ (alias_updates as u32).wrapping_mul(17)
+            ^ ((locale as u32) << 5)
+            ^ sequence.rotate_left((locale & 7) as u32);
+        self.pressure_score = self.pressure_score.rotate_left(3).wrapping_add(mixed);
+    }
+
+    fn should_pressure_compact(&self, added: usize, retired: usize, alias_updates: usize) -> bool {
+        let mixed_frame = added > 0 && (retired > 0 || alias_updates > 0);
+        mixed_frame
+            && self.phrases.len() >= 72
+            && self.additions_since_compact >= 80
+            && self.retired_since_compact >= 18
+            && self.alias_churn_since_compact >= 12
+            && self.resolves_since_compact >= 3
+            && self.pressure_score >= 8_192
     }
 }
