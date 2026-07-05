@@ -15,7 +15,7 @@ pub fn parse_frames(data: &[u8]) -> Result<Vec<Frame>> {
     while cursor.remaining() >= MIN_HEADER_LEN as usize {
         let start = cursor.position();
         let magic = cursor.read_bytes(4)?;
-        if magic != MAGIC {
+        if magic != MAGIC.as_slice() {
             return parse_legacy_stream(data);
         }
         let version = cursor.read_u8()?;

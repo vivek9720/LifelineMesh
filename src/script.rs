@@ -186,7 +186,7 @@ fn decode_leases(value: &[u8], out: &mut Vec<Lease>) -> Result<()> {
 }
 
 fn default_instructions(id: u16, dictionary: &mut Dictionary) -> Vec<ScriptInstruction> {
-    (0..4)
+    (0u8..4)
         .map(|index| ScriptInstruction {
             opcode: 0x20 + index,
             arg0: id,
