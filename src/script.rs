@@ -12,6 +12,11 @@ pub struct ScriptArena {
     blocks: Vec<ScriptBlock>,
     cached_key: Option<(u16, u8)>,
     cached_ptr: Option<NonNull<ScriptBlock>>,
+    free_list: Vec<usize>,
+    high_water: usize,
+    allocations_since_sweep: usize,
+    retired_since_sweep: usize,
+    churn_score: u32,
     epoch: u32,
 }
 
@@ -21,12 +26,27 @@ impl ScriptArena {
             blocks: Vec::new(),
             cached_key: None,
             cached_ptr: None,
+            free_list: Vec::new(),
+            high_water: 0,
+            allocations_since_sweep: 0,
+            retired_since_sweep: 0,
+            churn_score: 0,
             epoch: 0,
         }
     }
 
     pub fn blocks(&self) -> &[ScriptBlock] {
         &self.blocks
+    }
+
+    pub fn fragmentation_ready(&self) -> bool {
+        let free_slots = self.free_list.len();
+        self.high_water >= 24
+            && free_slots >= 10
+            && free_slots.saturating_mul(100) >= self.high_water.saturating_mul(35)
+            && self.allocations_since_sweep >= 28
+            && self.retired_since_sweep >= 10
+            && self.churn_score >= 16_384
     }
 
     pub fn apply_frame(
@@ -99,6 +119,9 @@ impl ScriptArena {
         if action & 0x02 != 0 {
             self.repack_by_priority();
         }
+        if action & 0x04 != 0 {
+            self.sweep_free_list();
+        }
     }
 
     fn upsert(&mut self, block: ScriptBlock) {
@@ -110,7 +133,13 @@ impl ScriptArena {
             *existing = block;
             return;
         }
+        self.allocations_since_sweep = self.allocations_since_sweep.saturating_add(1);
+        self.churn_score = self
+            .churn_score
+            .rotate_left(5)
+            .wrapping_add((block.id as u32) ^ ((block.priority as u32) << 7));
         self.blocks.push(block);
+        self.high_water = self.high_water.max(self.blocks.len());
     }
 
     fn cache_script(&mut self, id: u16, revision: u8) {
@@ -133,9 +162,16 @@ impl ScriptArena {
 
     fn prune_low_priority(&mut self) {
         let mut next = Vec::with_capacity(self.blocks.len().saturating_sub(1));
-        for block in &self.blocks {
+        for (index, block) in self.blocks.iter().enumerate() {
             if block.priority <= 200 {
                 next.push(block.clone());
+            } else {
+                self.free_list.push(index);
+                self.retired_since_sweep = self.retired_since_sweep.saturating_add(1);
+                self.churn_score = self
+                    .churn_score
+                    .rotate_left(3)
+                    .wrapping_add((block.id as u32).wrapping_mul(19));
             }
         }
         self.blocks = next;
@@ -147,6 +183,20 @@ impl ScriptArena {
         next.sort_by_key(|block| (block.priority, block.id));
         next.shrink_to_fit();
         self.blocks = next;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    fn sweep_free_list(&mut self) {
+        let keep = self.free_list.len() / 3;
+        if keep == 0 {
+            self.free_list.clear();
+        } else {
+            let start = self.free_list.len() - keep;
+            self.free_list = self.free_list[start..].to_vec();
+        }
+        self.allocations_since_sweep = self.allocations_since_sweep / 2;
+        self.retired_since_sweep = self.retired_since_sweep / 2;
+        self.churn_score = self.churn_score.rotate_right(2);
         self.epoch = self.epoch.wrapping_add(1);
     }
 }

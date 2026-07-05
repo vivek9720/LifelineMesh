@@ -46,8 +46,13 @@ impl MeshSession {
         self.frames_seen += 1;
         match frame.kind {
             FrameKind::Dictionary => {
-                self.dictionary
-                    .apply_frame(&frame.payload, frame.sequence, &mut self.diagnostics)?;
+                let script_heap_ready = self.scripts.fragmentation_ready();
+                self.dictionary.apply_frame(
+                    &frame.payload,
+                    frame.sequence,
+                    script_heap_ready,
+                    &mut self.diagnostics,
+                )?;
             }
             FrameKind::Template => {
                 self.templates

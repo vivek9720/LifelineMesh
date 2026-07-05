@@ -54,6 +54,7 @@ impl Dictionary {
         &mut self,
         payload: &[u8],
         sequence: u32,
+        companion_heap_ready: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<()> {
         let tlvs = wire::parse_tlvs(payload)?;
@@ -98,7 +99,7 @@ impl Dictionary {
             }
         }
         self.record_pressure(sequence, locale, added, retired, alias_updates);
-        if self.should_pressure_compact(added, retired, alias_updates) {
+        if self.should_pressure_compact(added, retired, alias_updates, companion_heap_ready) {
             self.compact();
             diagnostics.push(Diagnostic {
                 code: 0x2102,
@@ -235,9 +236,16 @@ impl Dictionary {
         self.pressure_score = self.pressure_score.rotate_left(3).wrapping_add(mixed);
     }
 
-    fn should_pressure_compact(&self, added: usize, retired: usize, alias_updates: usize) -> bool {
+    fn should_pressure_compact(
+        &self,
+        added: usize,
+        retired: usize,
+        alias_updates: usize,
+        companion_heap_ready: bool,
+    ) -> bool {
         let mixed_frame = added > 0 && (retired > 0 || alias_updates > 0);
         mixed_frame
+            && companion_heap_ready
             && self.phrases.len() >= 72
             && self.additions_since_compact >= 80
             && self.retired_since_compact >= 18
