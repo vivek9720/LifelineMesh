@@ -1,0 +1,9 @@
+language: rust
+fuzzing_engines:
+  - libfuzzer
+sanitizers:
+  - address
+fuzz_targets:
+  - batch_fuzzer
+  - manifest_fuzzer
+  - route_script_fuzzer
